@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Highline — Find Your Balance</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1" />
+<meta name="theme-color" content="#0b0e13" />
+<meta name="description" content="A calm, skill-based highline balancing game. Step, wobble, recover, breathe." />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Highline" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ 3D CANVAS ============ -->
+<canvas id="gl"></canvas>
+<div id="vignette" aria-hidden="true"></div>
+
+<!-- ============ BOOT ============ -->
+<div id="boot" class="boot">
+  <div class="boot-mark" aria-hidden="true">
+    <svg viewBox="0 0 120 40" width="120" height="40"><path d="M2 30 C 40 26, 80 26, 118 30" fill="none" stroke="rgba(255,255,255,.45)" stroke-width="1"/><g fill="#fff"><circle cx="60" cy="9" r="3.1"/><rect x="58.6" y="12" width="2.8" height="9" rx="1.3"/><rect x="48" y="14" width="24" height="1.7" rx=".85"/><rect x="56.6" y="20.5" width="1.8" height="8" rx=".9" transform="rotate(7 57.5 24)"/><rect x="61.6" y="20.5" width="1.8" height="8" rx=".9" transform="rotate(-7 62.5 24)"/></g></svg>
+  </div>
+  <div class="boot-title">HIGHLINE</div>
+  <div class="boot-bar"><i id="boot-fill"></i></div>
+  <div class="boot-hint" id="boot-hint">Rigging the line…</div>
+</div>
+
+<!-- ============ MAIN MENU ============ -->
+<section class="screen" id="screen-menu" data-screen="menu" hidden>
+  <header class="wordmark">
+    <div class="wordmark-mark" aria-hidden="true">
+      <svg viewBox="0 0 160 44" width="150" height="41"><path d="M2 33 C 50 27, 110 27, 158 33" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="1"/><g fill="#fff"><circle cx="80" cy="8" r="3.4"/><rect x="78.5" y="11.5" width="3" height="10" rx="1.4"/><rect x="66" y="13.8" width="28" height="1.8" rx=".9"/><rect x="76.6" y="21" width="2" height="9.5" rx="1" transform="rotate(8 77.6 25)"/><rect x="81.4" y="21" width="2" height="9.5" rx="1" transform="rotate(-8 82.4 25)"/></g></svg>
+    </div>
+    <h1>HIGHLINE</h1>
+    <p>find your balance</p>
+  </header>
+
+  <nav class="menu-list" id="menu-list">
+    <button class="menu-item" data-action="continue" id="btn-continue">
+      <span class="mi-ico">▶</span>
+      <span class="mi-text"><b>Continue</b><i id="continue-sub">Last session</i></span>
+    </button>
+    <button class="menu-item" data-action="freewalk">
+      <span class="mi-ico">⛰</span>
+      <span class="mi-text"><b>Free walk</b><i>Choose a line and just flow</i></span>
+    </button>
+    <button class="menu-item" data-action="challenges">
+      <span class="mi-ico">◈</span>
+      <span class="mi-text"><b>Challenges</b><i>Test your skills</i></span>
+    </button>
+    <button class="menu-item" data-action="locations">
+      <span class="mi-ico">◉</span>
+      <span class="mi-text"><b>Locations</b><i>Explore beautiful spots</i></span>
+    </button>
+    <button class="menu-item" data-action="customize">
+      <span class="mi-ico">✦</span>
+      <span class="mi-text"><b>Customize</b><i>Gear up your way</i></span>
+    </button>
+    <button class="menu-item" data-action="settings">
+      <span class="mi-ico">⚙</span>
+      <span class="mi-text"><b>Settings</b><i>Audio, controls, graphics</i></span>
+    </button>
+  </nav>
+
+  <div class="menu-mini">
+    <button class="mini-btn" data-action="stats" title="Your stats">◧</button>
+    <button class="mini-btn" data-action="tricks" title="Tricks">♟</button>
+    <button class="mini-btn" data-action="settings" title="Settings">⚙</button>
+  </div>
+
+  <aside class="env-card glass">
+    <div class="env-row"><span class="env-k">＋</span><b id="env-time">Evening</b><span class="env-ico" id="env-ico">⛅</span></div>
+    <div class="env-row"><span class="env-k">–</span><b id="env-temp">18°C</b></div>
+    <div class="env-row"><span class="env-k">↓</span><b id="env-wind">Light wind</b></div>
+  </aside>
+
+  <aside class="quote-card glass">
+    <div class="quote-head">◷ Daily quote</div>
+    <p id="quote-text">Balance is not something you find, it's something you feel.</p>
+  </aside>
+</section>
+
+<!-- ============ LOCATIONS ============ -->
+<section class="screen sheet" id="screen-locations" data-screen="locations" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Locations</h2>
+  </div>
+  <div class="loc-rail" id="loc-rail"></div>
+  <div class="rail-dots" id="loc-dots"></div>
+</section>
+
+<!-- ============ CHALLENGES ============ -->
+<section class="screen sheet" id="screen-challenges" data-screen="challenges" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Challenges</h2>
+    <span class="sheet-meta" id="chal-count">0 / 6</span>
+  </div>
+  <div class="chal-list" id="chal-list"></div>
+</section>
+
+<!-- ============ TRICKS ============ -->
+<section class="screen sheet" id="screen-tricks" data-screen="tricks" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Tricks</h2>
+  </div>
+  <div class="trick-rail" id="trick-rail"></div>
+  <div class="trick-foot">Unlocked <b id="trick-count">2 / 7</b></div>
+</section>
+
+<!-- ============ CUSTOMIZE ============ -->
+<section class="screen sheet" id="screen-customize" data-screen="customize" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Customize</h2>
+  </div>
+  <div class="cust-body">
+    <div class="cust-group"><label>Shirt</label><div class="swatches" id="sw-shirt"></div></div>
+    <div class="cust-group"><label>Trousers</label><div class="swatches" id="sw-pants"></div></div>
+    <div class="cust-group"><label>Webbing</label><div class="swatches" id="sw-line"></div></div>
+    <p class="cust-note">Changes apply the moment you step back on the line.</p>
+  </div>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section class="screen sheet" id="screen-settings" data-screen="settings" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Settings</h2>
+  </div>
+  <div class="set-body">
+    <div class="set-row"><label for="set-sens">Balance sensitivity</label><input type="range" id="set-sens" min="60" max="150" step="5"><span class="set-val" id="val-sens">100%</span></div>
+    <div class="set-row"><label>Exposure</label><div class="seg" id="set-diff" data-key="difficulty"><button data-v="calm">Calm</button><button data-v="standard">Standard</button><button data-v="exposed">Exposed</button></div></div>
+    <div class="set-row"><label>Graphics</label><div class="seg" id="set-quality" data-key="quality"><button data-v="low">Low</button><button data-v="medium">Medium</button><button data-v="high">High</button></div></div>
+    <div class="set-row"><label>Camera sway</label><div class="seg" id="set-shake" data-key="cameraSway"><button data-v="off">Off</button><button data-v="subtle">Subtle</button><button data-v="full">Full</button></div></div>
+    <div class="set-row"><label for="set-sound">Sound</label><input type="checkbox" id="set-sound" class="switch"></div>
+    <div class="set-row"><label for="set-haptics">Haptics</label><input type="checkbox" id="set-haptics" class="switch"></div>
+    <div class="set-row"><label for="set-hand">Left-handed layout</label><input type="checkbox" id="set-hand" class="switch"></div>
+    <button class="danger" id="btn-reset">Erase all progress</button>
+    <p class="set-note">Progress is stored on this device only. Version <span id="app-ver">1.0.0</span></p>
+  </div>
+</section>
+
+<!-- ============ STATS ============ -->
+<section class="screen sheet" id="screen-stats" data-screen="stats" hidden>
+  <div class="sheet-head">
+    <button class="back" data-action="back">‹</button>
+    <h2>Your stats</h2>
+  </div>
+  <div class="stat-grid" id="stat-grid"></div>
+</section>
+
+<!-- ============ HUD ============ -->
+<div id="hud" hidden>
+  <div class="hud-top">
+    <div class="hud-pill"><span>Distance</span><b id="hud-dist">0 m</b></div>
+    <div class="hud-pill center"><span>Best</span><b id="hud-best">0 m</b></div>
+    <div class="hud-pill"><span>Altitude</span><b id="hud-alt">0 m</b></div>
+    <button class="hud-menu" id="btn-pause" aria-label="Pause">≡</button>
+  </div>
+
+  <div class="hud-objective" id="hud-objective" hidden><b id="obj-title"></b><i id="obj-sub"></i></div>
+
+  <div class="hud-bottom">
+    <div class="meters">
+      <span class="m-label">Breath</span>
+      <div class="m-bar"><i id="breath-fill"></i></div>
+      <span class="m-label">Focus</span>
+      <div class="dots" id="focus-dots"><i></i><i></i><i></i></div>
+    </div>
+  </div>
+
+  <div class="wind-badge glass" id="wind-badge">
+    <span class="wb-ico" id="wb-arrow">➤</span>
+    <span class="wb-txt"><i>Wind</i><b id="wb-val">8 km/h</b></span>
+  </div>
+
+  <button class="act-btn act-steady" id="btn-steady" aria-label="Steady breath">◉</button>
+  <button class="act-btn act-trick" id="btn-trick" aria-label="Turn around">↺</button>
+
+  <div class="coach" id="coach" hidden></div>
+  <div class="gust-flash" id="gust-flash"></div>
+</div>
+
+<!-- ============ FALL / RESULT OVERLAY ============ -->
+<div class="overlay" id="overlay-fall" hidden>
+  <div class="ov-card glass">
+    <div class="ov-eyebrow" id="ov-eyebrow">Caught by the leash</div>
+    <div class="ov-big" id="ov-big">32 m</div>
+    <div class="ov-sub" id="ov-sub">You held the line for 32 metres.</div>
+    <div class="ov-actions">
+      <button class="btn primary" id="ov-again">Climb back on</button>
+      <button class="btn" id="ov-menu">Leave the line</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PAUSE ============ -->
+<div class="overlay" id="overlay-pause" hidden>
+  <div class="ov-card glass">
+    <div class="ov-eyebrow">Paused</div>
+    <div class="ov-big small" id="pause-loc">The Summit</div>
+    <div class="ov-sub" id="pause-sub">Take your time. The line will wait.</div>
+    <div class="ov-actions col">
+      <button class="btn primary" id="pz-resume">Resume</button>
+      <button class="btn" id="pz-restart">Restart line</button>
+      <button class="btn" id="pz-settings">Settings</button>
+      <button class="btn" id="pz-menu">Main menu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ORIENTATION ============ -->
+<div id="rotate" hidden>
+  <div class="rot-inner">
+    <div class="rot-ico">▭</div>
+    <b>Turn your phone sideways</b>
+    <p>Highline is built for landscape. Portrait works, but you'll see less of the drop.</p>
+    <button class="btn" id="rot-dismiss">Play in portrait</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
