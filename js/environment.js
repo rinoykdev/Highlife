@@ -1,61 +1,136 @@
 /* =========================================================
-   environment.js — the drop.
+   environment.js — the view.
 
-   Everything here is generated at runtime: no textures ship
-   with the game except two tiny canvas-drawn ones. That keeps
-   the PWA small enough to cache instantly and lets each
-   location re-skin the same geometry budget.
+   Rebuilt around a real heightfield instead of primitive
+   shapes. One ridged-multifractal terrain carries the whole
+   landscape: the gorge the line crosses, the rims it is
+   anchored to, and the ranges marching to the horizon.
+
+   Colour comes from altitude and slope, so snow settles on
+   high flat ground while cliff faces stay bare — the rule real
+   mountains follow, and most of why it reads as one.
+
+   Still no downloaded textures: terrain, trees, clouds and sky
+   are all generated at load.
    ========================================================= */
 
 import * as THREE from '../lib/three.module.min.js';
-import { fbm, noise1, clamp, lerp } from './physics.js';
+import { clamp, lerp } from './physics.js';
+
+/* ---------- deterministic value noise ---------- */
+function makePerm (seed) {
+  let s = (seed * 16807) % 2147483647;
+  if (s <= 0) s += 2147483646;
+  const rnd = () => (s = s * 16807 % 2147483647) / 2147483647;
+  const base = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) base[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = base[i]; base[i] = base[j]; base[j] = t;
+  }
+  const p = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) p[i] = base[i & 255];
+  return p;
+}
+
+function makeNoise (seed) {
+  const p = makePerm(seed);
+  const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const grad = (h, x, y) => {
+    switch (h & 3) {
+      case 0: return x + y;
+      case 1: return x - y;
+      case 2: return -x + y;
+      default: return -x - y;
+    }
+  };
+  return function noise2 (x, y) {
+    const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+    const xf = x - Math.floor(x), yf = y - Math.floor(y);
+    const u = fade(xf), v = fade(yf);
+    const aa = p[p[X] + Y], ab = p[p[X] + Y + 1];
+    const ba = p[p[X + 1] + Y], bb = p[p[X + 1] + Y + 1];
+    const x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1, yf), u);
+    const x2 = lerp(grad(ab, xf, yf - 1), grad(bb, xf - 1, yf - 1), u);
+    return lerp(x1, x2, v);
+  };
+}
+
+/**
+ * Ridged multifractal. Folding noise about zero turns rounded hills into
+ * sharp crests; weighting each octave by the previous one keeps those
+ * crests continuous instead of breaking up into gravel.
+ */
+function ridged (noise2, x, y, octaves, lacunarity = 2.05, gain = 0.5) {
+  let sum = 0, freq = 1, amp = 0.5, prev = 1;
+  for (let i = 0; i < octaves; i++) {
+    let n = 1 - Math.abs(noise2(x * freq, y * freq));
+    n *= n;
+    n *= prev;
+    prev = n;
+    sum += n * amp;
+    freq *= lacunarity;
+    amp *= gain;
+  }
+  return sum;
+}
 
 /* ---------- canvas textures ---------- */
-function cloudTexture () {
+function cloudSprite (seed) {
   const s = 128, c = document.createElement('canvas');
   c.width = c.height = s;
   const g = c.getContext('2d');
-  g.clearRect(0, 0, s, s);
-  // a few overlapping soft blobs = one puffy cloud
-  for (let i = 0; i < 7; i++) {
-    const x = s * (0.28 + Math.random() * 0.44);
-    const y = s * (0.42 + Math.random() * 0.26);
-    const r = s * (0.11 + Math.random() * 0.16);
-    const rad = g.createRadialGradient(x, y, 0, x, y, r);
-    rad.addColorStop(0, 'rgba(255,255,255,0.85)');
-    rad.addColorStop(0.55, 'rgba(255,255,255,0.35)');
-    rad.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = rad;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  let r = (seed * 9301) % 233280;
+  const rnd = () => (r = (r * 9301 + 49297) % 233280) / 233280;
+  for (let i = 0; i < 9; i++) {
+    const x = s * (0.26 + rnd() * 0.48);
+    const y = s * (0.40 + rnd() * 0.28);
+    const rad = s * (0.10 + rnd() * 0.17);
+    const grd = g.createRadialGradient(x, y - rad * 0.2, 0, x, y, rad);
+    grd.addColorStop(0, 'rgba(255,255,255,0.92)');
+    grd.addColorStop(0.5, 'rgba(255,255,255,0.36)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
   }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
 
-function cloudSeaTexture () {
+/**
+ * @param {number} density 0..1 — how much of the sheet is solid cloud.
+ *   The bottom layer wants near-total coverage so the unlit basin never
+ *   shows through as black holes; the layers above stay broken and puffy.
+ */
+function cloudSeaTexture (density = 0.5) {
   const s = 256, c = document.createElement('canvas');
   c.width = c.height = s;
   const g = c.getContext('2d');
-  g.fillStyle = 'rgba(255,255,255,0.10)';
-  g.fillRect(0, 0, s, s);
-  for (let i = 0; i < 190; i++) {
-    const x = Math.random() * s, y = Math.random() * s, r = 6 + Math.random() * 26;
-    const rad = g.createRadialGradient(x, y, 0, x, y, r);
-    const a = 0.05 + Math.random() * 0.22;
-    rad.addColorStop(0, `rgba(255,255,255,${a})`);
-    rad.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = rad;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  const img = g.createImageData(s, s);
+  const n1 = makeNoise(7), n2 = makeNoise(19);
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      const u = x / s * 5, v = y / s * 5;
+      let f = 0, amp = 0.5, fr = 1;
+      for (let o = 0; o < 4; o++) { f += Math.abs(n1(u * fr, v * fr)) * amp; fr *= 2.1; amp *= 0.52; }
+      const puff = clamp((f - (0.30 - density * 0.30)) * (1.6 + density * 2.4), 0, 1);
+      const hi = clamp(n2(u * 2.4, v * 2.4) * 0.5 + 0.5, 0, 1);
+      const i = (y * s + x) * 4;
+      const shade = 208 + hi * 47;
+      img.data[i] = shade; img.data[i + 1] = shade; img.data[i + 2] = shade;
+      img.data[i + 3] = puff * 255;
+    }
   }
+  g.putImageData(img, 0, 0);
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(6, 6);
+  t.repeat.set(5, 5);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
 
-/* ---------- sky dome ---------- */
+/* ---------- sky ---------- */
 const SKY_VERT = `
 varying vec3 vDir;
 void main(){
@@ -70,141 +145,54 @@ varying vec3 vDir;
 void main(){
   vec3 d = normalize(vDir);
   float h = d.y;
-  vec3 col;
-  if (h > 0.0) col = mix(horizonColor, topColor, pow(clamp(h,0.0,1.0), 0.55));
-  else         col = mix(horizonColor, groundColor, pow(clamp(-h,0.0,1.0), 0.42));
-  // sun disc + broad glow
   float c = max(dot(d, normalize(sunDir)), 0.0);
-  float halo  = pow(c, 7.0) * 0.18 * sunSize;               // wide atmospheric bloom
-  float glow  = pow(c, 120.0 / max(sunSize,0.3)) * 0.55;    // tight glow around the disc
-  float disc  = smoothstep(0.99972 - sunSize*0.00035, 0.99993, c);
-  col += sunColor * (halo + glow + disc * 1.35);
-  // gentle band of haze right on the horizon
-  col = mix(col, horizonColor, smoothstep(0.16, 0.0, abs(h)) * 0.45);
+
+  vec3 col;
+  if (h > 0.0) col = mix(horizonColor, topColor, pow(clamp(h,0.0,1.0), 0.42));
+  else         col = mix(horizonColor, groundColor, pow(clamp(-h,0.0,1.0), 0.38));
+
+  // warm wash spreading sideways from the sun along the horizon
+  float band = exp(-abs(h) * 7.0);
+  col = mix(col, sunColor, band * pow(c, 2.2) * 0.55);
+
+  float halo = pow(c, 6.0) * 0.20 * sunSize;
+  float glow = pow(c, 130.0 / max(sunSize, 0.3)) * 0.60;
+  float disc = smoothstep(0.99972 - sunSize * 0.00035, 0.99993, c);
+  col += sunColor * (halo + glow + disc * 1.5);
+
+  col = mix(col, horizonColor, smoothstep(0.13, 0.0, abs(h)) * 0.40);
   gl_FragColor = vec4(col, 1.0);
 }`;
 
-/* ---------- rock ---------- */
-function ridgeProfile (x, seed, rough) {
-  return fbm(x * 0.6 + seed) * 0.65 + fbm(x * 1.9 + seed * 2.3) * 0.26 * rough + fbm(x * 5.1 + seed) * 0.09 * rough;
-}
-
-/**
- * A rocky mass built from a displaced cylinder. Cheap, reads as a cliff
- * or a spire depending on the taper, and takes vertex colours so snow
- * can sit on the up-facing faces without a texture.
- */
-function makeCliff (opts) {
-  const {
-    rTop = 8, rBottom = 26, height = 120, seed = 1,
-    rock = '#4c4136', lit = '#8d7355', snow = 0.4, rough = 1
-  } = opts;
-  const geo = new THREE.CylinderGeometry(rTop, rBottom, height, 22, 12, false);
-  const pos = geo.attributes.position;
-  const cRock = new THREE.Color(rock), cLit = new THREE.Color(lit), cSnow = new THREE.Color('#e9f1f6');
-  const colors = new Float32Array(pos.count * 3);
-  const v = new THREE.Vector3();
-  const tmp = new THREE.Color();
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i);
-    const ang = Math.atan2(v.z, v.x);
-    const yN = (v.y + height / 2) / height;
-    // two scales of displacement: broad buttresses plus finer gullies
-    const n = ridgeProfile(ang * 2.4 + yN * 3.1, seed, rough);
-    const fine = ridgeProfile(ang * 6.7 + yN * 8.3, seed * 1.7, rough) * 0.35;
-    const radial = 1 + (n * 0.19 + fine * 0.07) * (0.5 + yN * 0.8);
-    v.x *= radial; v.z *= radial;
-    v.y += n * height * 0.035;
-    pos.setXYZ(i, v.x, v.y, v.z);
-
-    // colour: darker in the creases, lit on the shoulders, snow up top
-    const t = clamp(0.5 + (n + fine) * 0.7, 0, 1);
-    tmp.copy(cRock).lerp(cLit, t * (0.35 + yN * 0.65));
-    const cover = snow * 0.45;                       // only the summits hold snow
-    const snowAmt = clamp((yN - (1 - cover)) / Math.max(cover, 0.01), 0, 1) * clamp(0.35 + n, 0, 1);
-    tmp.lerp(cSnow, snowAmt * snow * 0.9);
-    colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+/* ---------- minimal geometry merge (position + index only) ---------- */
+function mergeGeometries (geos) {
+  let vCount = 0, iCount = 0;
+  for (const g of geos) {
+    vCount += g.attributes.position.count;
+    iCount += g.index ? g.index.count : g.attributes.position.count;
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-  return geo;
-}
-
-/**
- * The rock the line is actually rigged to: a broad ledge with a flat rim at
- * y=0 that falls away into the void. Used instead of a tower at each anchor
- * so the walker looks *over* the far edge into the valley rather than at a
- * wall.
- */
-function makeLedge (opts) {
-  const {
-    width = 26, depth = 30, drop = 220, seed = 2,
-    rock = '#4c4136', lit = '#8d7355', snow = 0.4
-  } = opts;
-  const geo = new THREE.BoxGeometry(width, drop, depth, 8, 14, 8);
-  const pos = geo.attributes.position;
-  const cRock = new THREE.Color(rock), cLit = new THREE.Color(lit), cSnow = new THREE.Color('#e9f1f6');
-  const colors = new Float32Array(pos.count * 3);
-  const v = new THREE.Vector3();
-  const tmp = new THREE.Color();
-  const top = drop / 2;
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i);
-    const yN = (top - v.y) / drop;                 // 0 at the rim, 1 at the bottom
-    const n = ridgeProfile(v.x * 0.22 + v.z * 0.17 + yN * 4.2, seed, 1);
-    if (yN > 0.02) {                               // leave the rim itself flat to stand on
-      const taper = 1 - yN * 0.45;                 // narrows as it falls away
-      v.x = v.x * taper + n * width * 0.11 * yN;
-      v.z = v.z * taper + n * depth * 0.10 * yN;
-      v.y += n * drop * 0.02;
-    } else {
-      v.x += n * width * 0.035;
-      v.z += n * depth * 0.03;
-    }
-    pos.setXYZ(i, v.x, v.y, v.z);
-
-    const t = clamp(0.5 + n * 0.7, 0, 1);
-    tmp.copy(cRock).lerp(cLit, t * (0.9 - yN * 0.75));
-    if (top - v.y < 2.4) tmp.lerp(cSnow, snow * 0.5);   // a real dusting, ~2 m of rim
-    colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+  const position = new Float32Array(vCount * 3);
+  const index = new Uint32Array(iCount);
+  let vo = 0, io = 0;
+  for (const g of geos) {
+    const p = g.attributes.position;
+    position.set(p.array, vo * 3);
+    const idx = g.index;
+    if (idx) for (let i = 0; i < idx.count; i++) index[io++] = idx.getX(i) + vo;
+    else for (let i = 0; i < p.count; i++) index[io++] = i + vo;
+    vo += p.count;
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-  return geo;
-}
-
-/** Flat silhouette ridge for the far distance — two triangles per span. */
-function makeRidge (width, height, segments, seed, colorTop, colorBottom, rough) {
-  const g = new THREE.BufferGeometry();
-  const verts = [], cols = [];
-  const cT = new THREE.Color(colorTop), cB = new THREE.Color(colorBottom);
-  const hAt = i => {
-    const x = i / segments;
-    return height * (0.42 + ridgeProfile(x * 7 + seed, seed, rough) * 0.6 + Math.sin(x * 3.1 + seed) * 0.16);
-  };
-  for (let i = 0; i < segments; i++) {
-    const x0 = (i / segments - 0.5) * width, x1 = ((i + 1) / segments - 0.5) * width;
-    const h0 = hAt(i), h1 = hAt(i + 1);
-    const yB = -height * 1.6;
-    verts.push(x0, h0, 0, x1, h1, 0, x0, yB, 0);
-    verts.push(x1, h1, 0, x1, yB, 0, x0, yB, 0);
-    const push = (c) => cols.push(c.r, c.g, c.b);
-    push(cT); push(cT); push(cB); push(cT); push(cB); push(cB);
-  }
-  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
-  return g;
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(position, 3));
+  out.setIndex(new THREE.BufferAttribute(index, 1));
+  out.computeVertexNormals();
+  return out;
 }
 
 /* =========================================================
    Environment
    ========================================================= */
 export class Environment {
-  /**
-   * @param {THREE.Scene} scene
-   * @param {object} def   location definition from content.js
-   * @param {string} quality  low | medium | high
-   */
   constructor (scene, def, quality = 'medium') {
     this.scene = scene;
     this.def = def;
@@ -214,19 +202,314 @@ export class Environment {
     scene.add(this.group);
     this.time = 0;
 
-    const q = quality === 'low' ? 0.55 : quality === 'high' ? 1.25 : 1;
-    this.q = q;
+    this.seg = quality === 'low' ? 112 : quality === 'high' ? 216 : 160;
+    this.q = quality === 'low' ? 0.55 : quality === 'high' ? 1.25 : 1;
+
+    this.noise = makeNoise(def.seed || 11);
+    this.detail = makeNoise((def.seed || 11) + 77);
 
     this._buildSky();
     this._buildLights();
-    this._buildCliffs();
-    this._buildRidges();
+    this._buildTerrain();
+    this._buildTrees();
+    this._buildCloudSea();
     this._buildClouds();
     this._buildBirds();
-    this._buildVegetation();
   }
 
-  /* ---------- sky + fog ---------- */
+  /**
+   * World height in metres at (x, z). The gorge is carved along the x-axis
+   * so the line, which runs down z, crosses it. Both rims land near y = -2
+   * where the anchors are bolted.
+   */
+  height (x, z) {
+    const d = this.def;
+    const S = 0.00115;
+    const gorgeHalf = d.lineLength * 0.5;
+
+    const r = ridged(this.noise, x * S + 40, z * S + 40, 6);
+    const detail = this.detail(x * S * 4.2, z * S * 4.2) * 0.5 + 0.5;
+    // Mid and fine octaves. Without these the only wavelength in the terrain
+    // is ~900 m, so anything within a few hundred metres of the walker reads
+    // as a featureless smooth hill.
+    const mid = this.detail(x * S * 9, z * S * 9);
+    const fine = this.noise(x * S * 34, z * S * 34);
+
+    const distZ = Math.abs(z), distX = Math.abs(x);
+    // Mountains have to grow over KILOMETRES. Ramping the massing over a few
+    // hundred metres put 400 m peaks 400 m away — a 42-degree wall across the
+    // whole view. Nothing tall starts until well past the rim plateau, and
+    // full height only arrives around 2.4 km out.
+    const RIM = 55;                           // narrow ledge you rig from
+    const BASIN = 150;                        // the ground plunges fast past the ledge
+    const RANGE = 3000;                       // distance over which peaks build
+    const beyond = clamp((distZ - gorgeHalf - 850) / RANGE, 0, 1);
+    // Directional variation, or the ranges form a perfectly even ring around
+    // the player like a crater rim. Some bearings get big massifs, others
+    // open out into low country.
+    const bearing = this.noise(x * 0.00028 + 9, z * 0.00028 + 9) * 0.5 + 0.5;
+    const massing = Math.pow(beyond, 1.25) * (0.34 + 1.05 * bearing);
+
+    // Beyond the rim the ground FALLS AWAY into a wide bowl before the ranges
+    // climb back out of it. Without this the rim was a flat plateau that hid
+    // the drop entirely, and the cloud sea had nowhere to sit.
+    const bt = clamp((distZ - gorgeHalf - RIM) / BASIN, 0, 1);
+    const bowl = lerp(-2.2, -d.basinDepth, bt * bt * (3 - 2 * bt));
+    const base = lerp(bowl, 0, massing);
+
+    let h = base + (r - 0.24) * d.peakHeight * (0.10 + massing * 1.80);
+    h += (detail - 0.5) * 26 * (0.25 + massing * 1.4);
+
+    // High-frequency octaves have to fade with distance or they alias into
+    // needles once the warped grid reaches 200 m cells out at the horizon.
+    const dist = Math.sqrt(x * x + z * z);
+    const detailFade = clamp(1 - dist / 1700, 0, 1);
+    h += mid * 21 * (0.55 + massing) * detailFade;
+    h += fine * 5.5 * detailFade;
+
+    // the ledge itself: flat enough to stand on, and it narrows away from the line
+    const rimBlend = 1 - clamp((distZ - gorgeHalf) / RIM, 0, 1);
+    const shelf = -2.2 - Math.pow(clamp(distX / 260, 0, 1), 2) * 30;
+    h = lerp(h, shelf, rimBlend * 0.9);
+
+    // carve the gorge
+    if (distZ < gorgeHalf) {
+      const t = distZ / gorgeHalf;
+      const wall = Math.pow(t, 2.6);
+      const floor = -d.gorgeDepth + (detail - 0.5) * 90;
+      h = lerp(floor, Math.min(h, -2.2), wall);
+    }
+    return h;
+  }
+
+  /**
+   * A uniform grid cannot do this job: the gorge is ~150 m across but the
+   * landscape runs to 2.6 km, so an even 5 km plane spends all its vertices
+   * on empty distance and renders the gorge in four cells. Instead the grid
+   * is warped — vertex spacing follows |u|^2.5, giving roughly 8 m cells
+   * around the line and 200 m ones out at the horizon, from a single seamless
+   * mesh with no LOD popping.
+   */
+  _warpAxis (i, seg, halfExtent) {
+    const u = (i / seg) * 2 - 1;              // -1 .. 1
+    const t = Math.pow(Math.abs(u), 2.5);
+    return Math.sign(u) * t * halfExtent;
+  }
+
+  _buildTerrain () {
+    const d = this.def;
+    const seg = this.seg;
+    const HALF = 3800;
+    const n = seg + 1;
+
+    const positions = new Float32Array(n * n * 3);
+    const colors = new Float32Array(n * n * 3);
+    const indices = new Uint32Array(seg * seg * 6);
+
+    const xs = new Float32Array(n), zs = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      xs[i] = this._warpAxis(i, seg, HALF);
+      zs[i] = this._warpAxis(i, seg, HALF);
+    }
+
+    let p = 0;
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const x = xs[i], z = zs[j];
+        positions[p] = x;
+        positions[p + 1] = this.height(x, z);
+        positions[p + 2] = z;
+        p += 3;
+      }
+    }
+
+    let k = 0;
+    for (let j = 0; j < seg; j++) {
+      for (let i = 0; i < seg; i++) {
+        const a = j * n + i, b = a + 1, c = a + n, e = c + 1;
+        indices[k++] = a; indices[k++] = c; indices[k++] = b;
+        indices[k++] = b; indices[k++] = c; indices[k++] = e;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+
+    // colour by altitude and slope — snow on high flat ground, bare rock on
+    // anything steep, green in the sheltered low country
+    const cRock = new THREE.Color(d.rock);
+    const cRockLit = new THREE.Color(d.rockLit);
+    const cGrass = new THREE.Color(d.grass || '#3f4a32');
+    const cSnow = new THREE.Color('#eef4fa');
+    const cDeep = new THREE.Color(d.valley);
+    const tmp = new THREE.Color();
+    const nrm = geo.attributes.normal;
+    const snowLine = d.snowLine ?? 120;
+
+    for (let i = 0; i < n * n; i++) {
+      const y = positions[i * 3 + 1];
+      const slope = 1 - clamp(nrm.getY(i), 0, 1);
+      const alt = (y - snowLine) / 260;
+
+      tmp.copy(cGrass).lerp(cRock, clamp(slope * 2.4 + clamp(alt + 0.5, 0, 1) * 0.7, 0, 1));
+      tmp.lerp(cRockLit, clamp((1 - slope) * 0.45 + alt * 0.25, 0, 1) * 0.55);
+
+      const snowAmt = clamp(alt, 0, 1) * clamp(1 - slope * 1.75, 0, 1) * (d.snow ?? 0.5);
+      tmp.lerp(cSnow, clamp(snowAmt * 1.6, 0, 1));
+
+      const depth = clamp(-y / (d.gorgeDepth * 0.9), 0, 1);
+      tmp.lerp(cDeep, depth * 0.3);
+
+      colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.terrain = new THREE.Mesh(geo, mat);
+    this.terrain.frustumCulled = false;
+    this.group.add(this.terrain);
+    this.disposables.push(geo, mat);
+  }
+
+  _buildTrees () {
+    const d = this.def;
+    if ((d.treeLine ?? 0) <= 0) { this.trees = null; return; }
+
+    const count = Math.round((this.quality === 'low' ? 240 : 560) * this.q);
+    const trunk = new THREE.CylinderGeometry(0.18, 0.26, 2.2, 5); trunk.translate(0, 1.1, 0);
+    const skirt = new THREE.ConeGeometry(1.9, 4.6, 7); skirt.translate(0, 3.9, 0);
+    const top = new THREE.ConeGeometry(1.25, 4.0, 7); top.translate(0, 6.4, 0);
+    const merged = mergeGeometries([trunk, skirt, top]);
+    trunk.dispose(); skirt.dispose(); top.dispose();
+
+    const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(d.tree || '#2c3a26') });
+    const mesh = new THREE.InstancedMesh(merged, mat, count);
+    mesh.frustumCulled = false;
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    const scl = new THREE.Vector3();
+    const posV = new THREE.Vector3();
+    const half = d.lineLength * 0.5;
+    let placed = 0, guard = 0;
+
+    while (placed < count && guard++ < count * 16) {
+      const side = Math.random() < 0.5 ? 1 : -1;
+      const z = side * (half + Math.pow(Math.random(), 1.7) * 420);
+      const x = (Math.random() - 0.5) * 1500;
+      const y = this.height(x, z);
+      if (y < -60 || y > d.treeLine) continue;
+
+      // no trees on cliff faces
+      const hx = this.height(x + 6, z) - y;
+      const hz = this.height(x, z + 6) - y;
+      if (Math.hypot(hx, hz) / 6 > 0.62) continue;
+      // keep the webbing corridor clear
+      if (Math.abs(x) < 9 && Math.abs(Math.abs(z) - half) < 26) continue;
+
+      const s = 0.55 + Math.random() * 0.95;
+      posV.set(x, y - 0.4, z);
+      scl.set(s * (0.8 + Math.random() * 0.4), s * (0.85 + Math.random() * 0.5), s * (0.8 + Math.random() * 0.4));
+      q.setFromAxisAngle(up, Math.random() * Math.PI);
+      m.compose(posV, q, scl);
+      mesh.setMatrixAt(placed++, m);
+    }
+    mesh.count = placed;
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+    this.trees = mesh;
+    this.disposables.push(merged, mat);
+  }
+
+  _buildCloudSea () {
+    const d = this.def;
+    this.seaLayers = [];
+    // Layers stack DOWNWARD from cloudLevel. Offsetting them upward was fine
+    // when the sea sat 430 m down, but now that it pools just under the rim it
+    // put a 5 km sheet a metre below the walker's feet, across the whole view.
+    const heights = [d.cloudLevel - 210, d.cloudLevel - 120, d.cloudLevel - 52, d.cloudLevel];
+    const opac = [1.0, 0.78, 0.46, 0.24];
+    const dens = [1.0, 0.55, 0.42, 0.30];
+    const texes = dens.map(v => cloudSeaTexture(v));
+    for (const t of texes) this.disposables.push(t);
+    for (let i = 0; i < heights.length; i++) {
+      const tex = texes[i];
+      const geo = new THREE.PlaneGeometry(5200, 5200);
+      // Unlit on purpose: a horizontal plane under a 6-degree sun gets almost
+      // no diffuse light, which turned the cloud sea black exactly when it
+      // should be the brightest thing in the gorge.
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, opacity: opac[i], depthWrite: false,
+        color: new THREE.Color(d.cloudColor).multiplyScalar(1 - i * 0.12),
+        side: THREE.DoubleSide
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.rotation.x = -Math.PI / 2;
+      m.rotation.z = i * 0.7;
+      m.position.y = heights[i];
+      tex.offset.set(i * 0.31, i * 0.17);
+      m.renderOrder = 1 + i;
+      this.group.add(m);
+      this.seaLayers.push(m);
+      this.disposables.push(geo, mat);
+    }
+  }
+
+  _buildClouds () {
+    const d = this.def;
+    const count = Math.round(d.cloudCount * this.q);
+    this.clouds = [];
+    const texes = [cloudSprite(3), cloudSprite(11), cloudSprite(29)];
+    for (const t of texes) this.disposables.push(t);
+
+    for (let i = 0; i < count; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: texes[i % texes.length], transparent: true, depthWrite: false,
+        color: new THREE.Color(d.cloudColor), fog: false
+      });
+      const s = new THREE.Sprite(mat);
+      const high = Math.random() < 0.45;
+      const scale = high ? 260 + Math.random() * 520 : 90 + Math.random() * 300;
+      s.scale.set(scale * (1.4 + Math.random() * 0.8), scale * (high ? 0.28 : 0.5), 1);
+      s.position.set(
+        (Math.random() - 0.5) * 3400,
+        high ? 240 + Math.random() * 420 : d.cloudLevel * (0.2 + Math.random() * 0.5) + 120,
+        -400 - Math.random() * 2600
+      );
+      mat.opacity = high ? 0.20 + Math.random() * 0.35 : 0.30 + Math.random() * 0.45;
+      s.userData.speed = 1.4 + Math.random() * 3.6;
+      s.userData.baseOpacity = mat.opacity;
+      this.group.add(s);
+      this.clouds.push(s);
+      this.disposables.push(mat);
+    }
+  }
+
+  _buildBirds () {
+    const d = this.def;
+    const count = Math.max(2, Math.round(d.birds * this.q));
+    const mat = new THREE.LineBasicMaterial({ color: 0x2a2622, transparent: true, opacity: 0.55 });
+    this.disposables.push(mat);
+    this.birds = [];
+    for (let i = 0; i < count; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, 0, 0, 0, 0.35, 0, 1, 0, 0], 3));
+      const line = new THREE.Line(geo, mat);
+      line.userData = {
+        r: 90 + Math.random() * 320, a: Math.random() * Math.PI * 2,
+        speed: 0.05 + Math.random() * 0.11,
+        y: -30 - Math.random() * 180, z: -120 - Math.random() * 520,
+        flap: Math.random() * 6, scale: 1.6 + Math.random() * 3
+      };
+      this.group.add(line);
+      this.birds.push(line);
+      this.disposables.push(geo);
+    }
+  }
+
   _buildSky () {
     const d = this.def;
     const sunDir = new THREE.Vector3(
@@ -246,7 +529,7 @@ export class Environment {
       },
       vertexShader: SKY_VERT, fragmentShader: SKY_FRAG
     });
-    const geo = new THREE.SphereGeometry(2600, 24, 14);
+    const geo = new THREE.SphereGeometry(4200, 28, 16);
     this.sky = new THREE.Mesh(geo, mat);
     this.sky.renderOrder = -1;
     this.group.add(this.sky);
@@ -258,234 +541,50 @@ export class Environment {
   _buildLights () {
     const d = this.def;
     const sun = new THREE.DirectionalLight(new THREE.Color(d.sun.color), d.sun.intensity);
-    sun.position.copy(this.sunDir).multiplyScalar(300);
+    sun.position.copy(this.sunDir).multiplyScalar(600);
     this.group.add(sun);
+    this.sunLight = sun;
 
-    // cool bounce from the valley + sky, keeps shadow sides readable
-    const hemi = new THREE.HemisphereLight(new THREE.Color(d.sky.top), new THREE.Color(d.valley), 0.85);
+    const hemi = new THREE.HemisphereLight(new THREE.Color(d.sky.top), new THREE.Color(d.valley), 0.95);
     this.group.add(hemi);
 
-    // rim light straight back at the walker for that golden edge
-    const rim = new THREE.DirectionalLight(new THREE.Color(d.sun.color), 0.55);
-    rim.position.set(-this.sunDir.x * 200, 60, -this.sunDir.z * 200);
-    this.group.add(rim);
+    const fill = new THREE.DirectionalLight(new THREE.Color(d.sky.horizon), 0.55);
+    fill.position.set(-this.sunDir.x * 400, 220, -this.sunDir.z * 400);
+    this.group.add(fill);
 
-    this.sunLight = sun;
+    // A backlit sunset leaves every near face in shadow. A little ambient
+    // keeps those faces as readable silhouettes instead of black holes.
+    this.group.add(new THREE.AmbientLight(new THREE.Color(d.fog.color), 0.62));
   }
 
-  /* ---------- big rock ---------- */
-  _buildCliffs () {
-    const d = this.def;
-    const half = d.lineLength / 2;
-    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-    this.disposables.push(mat);
-
-    const add = (geo, x, y, z, ry, s = 1) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(x, y, z);
-      m.rotation.y = ry;
-      m.scale.setScalar(s);
-      this.group.add(m);
-      this.disposables.push(geo);
-      return m;
-    };
-
-    // near anchor (behind the player) and far anchor (the goal)
-    // Anchor ledges: the rim sits a hair below the webbing so the line
-    // visibly leaves the rock, and the far one is low enough to see over.
-    // The rims sit below the webbing — real highlines are bolted under the
-    // lip — which keeps the horizon and the sun open above the far anchor
-    // instead of walling off the middle of the frame.
-    const nearGeo = makeLedge({ width: 34, depth: 34, drop: 240, seed: 3.1, rock: d.rock, lit: d.rockLit, snow: d.snow });
-    add(nearGeo, 0, -120 - 1.7, half + 16, 0.15);
-
-    const farGeo = makeLedge({ width: 22, depth: 30, drop: 260, seed: 7.7, rock: d.rock, lit: d.rockLit, snow: d.snow });
-    add(farGeo, 0, -130 - 2.6, -half - 14, -0.2);
-
-    // massifs pushed well off-axis so the centre of frame stays open
-    const sideA = makeCliff({ rTop: 30, rBottom: 70, height: 300, seed: 11.3, rock: d.rock, lit: d.rockLit, snow: d.snow * 0.7, rough: 1.2 });
-    add(sideA, -128, -176, half + 40, 1.1, 1.1);
-    const sideB = makeCliff({ rTop: 24, rBottom: 64, height: 340, seed: 5.5, rock: d.rock, lit: d.rockLit, snow: d.snow * 0.7, rough: 1.2 });
-    add(sideB, 152, -196, -half - 70, 0.3, 1.15);
-    const sideC = makeCliff({ rTop: 34, rBottom: 78, height: 280, seed: 17.9, rock: d.rock, lit: d.rockLit, snow: d.snow * 0.6, rough: 1.1 });
-    add(sideC, -104, -190, -half - 130, 2.4, 1.2);
-
-    // The far anchor needs something to belong to, or it reads as a slab
-    // hanging in space. This sits behind and below it, off to one side of
-    // the sun so the sky stays open.
-    const backing = makeCliff({ rTop: 58, rBottom: 130, height: 420, seed: 23.4, rock: d.rock, lit: d.rockLit, snow: d.snow * 0.85, rough: 1.15 });
-    add(backing, 46, -240, -half - 112, 1.7, 1.0);
-
-    // a couple of mid-distance spires for parallax
-    const n = this.quality === 'low' ? 2 : 4;
-    for (let i = 0; i < n; i++) {
-      const g = makeCliff({
-        rTop: 20 + Math.random() * 22, rBottom: 46 + Math.random() * 34, height: 260 + Math.random() * 240,
-        seed: 20 + i * 3.7, rock: d.rock, lit: d.rockLit, snow: d.snow * 0.9, rough: 1.1
-      });
-      const side = i % 2 ? 1 : -1;
-      add(g, side * (240 + Math.random() * 300), -330 - Math.random() * 160, -420 - i * 300 - Math.random() * 240, Math.random() * 3);
-    }
-  }
-
-  _buildRidges () {
-    const d = this.def;
-    const layers = this.quality === 'low' ? 2 : 3;
-    const fog = new THREE.Color(d.fog.color);
-    for (let i = 0; i < layers; i++) {
-      const depth = 900 + i * 620;
-      const t = i / Math.max(1, layers - 1);
-      const top = new THREE.Color(d.rock).lerp(fog, 0.45 + t * 0.42);
-      const bot = new THREE.Color(d.valley).lerp(fog, 0.35 + t * 0.4);
-      const geo = makeRidge(depth * 2.6, 90 + i * 40, 46 - i * 10, 13 + i * 9, top, bot, 1 - t * 0.5);
-      const mat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false, depthWrite: false });
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(0, -70 - i * 26, -depth);
-      m.renderOrder = -1 + i * 0.01;
-      this.group.add(m);
-      this.disposables.push(geo, mat);
-    }
-
-    // cloud sea far below — the single strongest height cue
-    const seaTex = cloudSeaTexture();
-    const seaGeo = new THREE.PlaneGeometry(4200, 4200, 1, 1);
-    const seaMat = new THREE.MeshBasicMaterial({
-      map: seaTex, transparent: true, opacity: 0.55, depthWrite: false,
-      // blended toward the haze so it sits far below rather than underfoot
-      color: new THREE.Color(d.cloudColor).lerp(new THREE.Color(d.fog.color), 0.45),
-      fog: false
-    });
-    this.sea = new THREE.Mesh(seaGeo, seaMat);
-    this.sea.rotation.x = -Math.PI / 2;
-    this.sea.position.y = d.cloudLevel;
-    this.group.add(this.sea);
-    this.disposables.push(seaGeo, seaMat, seaTex);
-
-    // valley floor, mostly lost in haze
-    const flGeo = new THREE.PlaneGeometry(6000, 6000);
-    const flMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(d.valley), fog: false });
-    const floor = new THREE.Mesh(flGeo, flMat);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = d.cloudLevel - 260;
-    this.group.add(floor);
-    this.disposables.push(flGeo, flMat);
-  }
-
-  /* ---------- clouds ---------- */
-  _buildClouds () {
-    const d = this.def;
-    const tex = cloudTexture();
-    this.disposables.push(tex);
-    const count = Math.round(d.cloudCount * this.q);
-    this.clouds = [];
-    const mat = new THREE.SpriteMaterial({
-      map: tex, transparent: true, depthWrite: false, fog: false,
-      color: new THREE.Color(d.cloudColor), opacity: 0.75
-    });
-    this.disposables.push(mat);
-    for (let i = 0; i < count; i++) {
-      const s = new THREE.Sprite(mat.clone());
-      const scale = 60 + Math.random() * 220;
-      s.scale.set(scale * (1.3 + Math.random() * 0.7), scale * 0.55, 1);
-      s.position.set(
-        (Math.random() - 0.5) * 1500,
-        d.cloudLevel * (0.25 + Math.random() * 0.55) + (Math.random() - 0.3) * 90,
-        -180 - Math.random() * 1500
-      );
-      s.material.opacity = 0.28 + Math.random() * 0.45;
-      s.userData.speed = 1.6 + Math.random() * 3.4;
-      s.userData.baseOpacity = s.material.opacity;
-      this.group.add(s);
-      this.clouds.push(s);
-      this.disposables.push(s.material);
-    }
-  }
-
-  /* ---------- birds ---------- */
-  _buildBirds () {
-    const d = this.def;
-    const count = Math.max(2, Math.round(d.birds * this.q));
-    const mat = new THREE.LineBasicMaterial({ color: 0x2a2622, transparent: true, opacity: 0.6 });
-    this.disposables.push(mat);
-    this.birds = [];
-    for (let i = 0; i < count; i++) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, 0, 0, 0, 0.35, 0, 1, 0, 0], 3));
-      const line = new THREE.Line(geo, mat);
-      const r = 60 + Math.random() * 240;
-      line.userData = {
-        r, a: Math.random() * Math.PI * 2,
-        speed: 0.06 + Math.random() * 0.13,
-        y: -20 - Math.random() * 120,
-        z: -80 - Math.random() * 420,
-        flap: Math.random() * 6, scale: 1.4 + Math.random() * 2.6
-      };
-      line.scale.setScalar(line.userData.scale);
-      this.group.add(line);
-      this.birds.push(line);
-      this.disposables.push(geo);
-    }
-  }
-
-  /* ---------- vegetation at the anchors ---------- */
-  _buildVegetation () {
-    const d = this.def;
-    if (d.snow > 0.6) { this.plants = []; return;  }   // nothing grows up there
-    const half = d.lineLength / 2;
-    const geo = new THREE.ConeGeometry(1.4, 6, 5);
-    const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(d.valley).offsetHSL(0, 0.05, 0.06) });
-    this.disposables.push(geo, mat);
-    const count = this.quality === 'low' ? 6 : 12;
-    this.plants = [];
-    for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(geo, mat);
-      const near = i % 2 === 0;
-      m.position.set(
-        (Math.random() - 0.5) * 34,
-        -4 - Math.random() * 8,
-        (near ? half + 12 : -half - 14) + (Math.random() - 0.5) * 18
-      );
-      m.scale.setScalar(0.5 + Math.random() * 1.1);
-      m.userData.phase = Math.random() * 6;
-      m.userData.baseRot = (Math.random() - 0.5) * 0.1;
-      this.group.add(m);
-      this.plants.push(m);
-    }
-  }
-
-  /* ---------- per-frame ---------- */
   update (dt, windLateral, windSpeed) {
     this.time += dt;
     const t = this.time;
-    const drift = 1 + Math.abs(windLateral) * 1.6;
+    const drift = 1 + Math.abs(windLateral) * 1.4;
+    const dir = Math.sign(windLateral || 1);
 
     for (const c of this.clouds) {
-      c.position.x += c.userData.speed * dt * drift * Math.sign(windLateral || 1);
-      if (c.position.x > 900) c.position.x = -900;
-      if (c.position.x < -900) c.position.x = 900;
-      c.material.opacity = c.userData.baseOpacity * (0.85 + 0.15 * Math.sin(t * 0.3 + c.position.z));
+      c.position.x += c.userData.speed * dt * drift * dir;
+      if (c.position.x > 1900) c.position.x = -1900;
+      if (c.position.x < -1900) c.position.x = 1900;
+      c.material.opacity = c.userData.baseOpacity * (0.85 + 0.15 * Math.sin(t * 0.25 + c.position.z));
     }
 
-    if (this.sea && this.sea.material.map) {
-      const m = this.sea.material.map;
-      m.offset.x += dt * 0.0035 * drift;
-      m.offset.y += dt * 0.0012;
+    for (let i = 0; i < this.seaLayers.length; i++) {
+      const m = this.seaLayers[i].material.map;
+      if (!m) continue;
+      m.offset.x += dt * (0.0022 + i * 0.0016) * drift * dir;
+      m.offset.y += dt * 0.0009;
     }
 
     for (const b of this.birds) {
       const u = b.userData;
       u.a += u.speed * dt;
-      b.position.set(Math.cos(u.a) * u.r, u.y + Math.sin(u.a * 1.7) * 6, u.z + Math.sin(u.a) * u.r * 0.6);
+      b.position.set(Math.cos(u.a) * u.r, u.y + Math.sin(u.a * 1.7) * 8, u.z + Math.sin(u.a) * u.r * 0.6);
       b.rotation.z = Math.sin(u.a) * 0.3;
       b.rotation.y = -u.a + Math.PI / 2;
       const flap = Math.sin(t * 7 + u.flap);
       b.scale.set(u.scale, u.scale * (0.6 + flap * 0.5), u.scale);
-    }
-
-    if (this.plants) {
-      for (const p of this.plants) {
-        p.rotation.z = p.userData.baseRot + windLateral * 0.18 + Math.sin(t * 2.4 + p.userData.phase) * 0.035 * (1 + windSpeed * 0.05);
-      }
     }
   }
 
