@@ -317,6 +317,18 @@ export class UI {
   }
 
   /* ---------------- fall result ---------------- */
+  /** Reaching the far anchor — the good ending. */
+  showCrossing (info) {
+    const ov = $('overlay-fall');
+    $('ov-eyebrow').textContent = 'Crossing complete';
+    $('ov-big').textContent = `${fmt(info.distance)} m`;
+    $('ov-sub').textContent = info.record
+      ? 'The full length, and a new best. Hands steady.'
+      : 'You touched the far rock. The whole line, start to finish.';
+    $('ov-again').textContent = 'Walk it again';
+    ov.hidden = false;
+  }
+
   showFall (info) {
     const ov = $('overlay-fall');
     const out = info.focusLeft <= 0;
@@ -389,7 +401,6 @@ export class UI {
     steady.addEventListener('pointerup', press(false));
     steady.addEventListener('pointercancel', press(false));
     steady.addEventListener('pointerleave', press(false));
-    $('btn-trick').addEventListener('click', (e) => { e.preventDefault(); this.game.requestTurn(); });
 
     // settings
     $('set-sens').addEventListener('input', (e) => {
