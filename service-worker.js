@@ -5,7 +5,7 @@
    CACHE_VERSION on every deploy to roll users forward.
    ========================================================= */
 
-const CACHE_VERSION = 'highline-v1.0.0';
+const CACHE_VERSION = 'highline-v1.1.0';
 
 /* Relative paths so the app works from a GitHub Pages subfolder. */
 const PRECACHE = [
@@ -24,6 +24,8 @@ const PRECACHE = [
   './js/storage.js',
   './js/content.js',
   './lib/three.module.min.js',
+  './lib/GLTFLoader.js',
+  './lib/BufferGeometryUtils.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
