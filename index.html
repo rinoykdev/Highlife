@@ -29,7 +29,50 @@
   <div class="boot-title">HIGHLINE</div>
   <div class="boot-bar"><i id="boot-fill"></i></div>
   <div class="boot-hint" id="boot-hint">Rigging the line…</div>
+  <div class="boot-error" id="boot-error" hidden>
+    <b id="boot-error-title"></b>
+    <p id="boot-error-body"></p>
+    <code id="boot-error-cmd" hidden></code>
+  </div>
 </div>
+
+<!-- Classic (non-module) script: if the module bundle cannot load, this still
+     runs and explains why, instead of leaving a loading screen forever. -->
+<script>
+(function () {
+  var failures = [];
+  window.addEventListener('error', function (e) {
+    if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+      failures.push(e.target.src || e.target.href);
+    }
+  }, true);
+
+  setTimeout(function () {
+    if (window.highline) return;                    // booted fine
+    var t = document.getElementById('boot-error-title');
+    var b = document.getElementById('boot-error-body');
+    var c = document.getElementById('boot-error-cmd');
+    var hint = document.getElementById('boot-hint');
+
+    if (location.protocol === 'file:') {
+      t.textContent = 'Highline needs a web server';
+      b.textContent = 'Browsers block this game\u2019s modules when the page is opened straight from a file. Serve the folder over http instead \u2014 run this inside it, then open localhost:8000.';
+      c.textContent = 'python3 -m http.server 8000';
+      c.hidden = false;
+    } else if (!window.WebGLRenderingContext) {
+      t.textContent = 'This browser has no WebGL';
+      b.textContent = 'Highline draws its mountains with WebGL. Try Safari, Chrome or Firefox with hardware acceleration switched on.';
+    } else {
+      t.textContent = 'Something did not load';
+      b.textContent = failures.length
+        ? 'Could not fetch: ' + failures.join(', ') + '. Check the file is present and the path matches, including capitals.'
+        : 'Open the browser console for the specific error.';
+    }
+    hint.hidden = true;
+    document.getElementById('boot-error').hidden = false;
+  }, 4000);
+})();
+</script>
 
 <!-- ============ MAIN MENU ============ -->
 <section class="screen" id="screen-menu" data-screen="menu" hidden>
@@ -184,7 +227,6 @@
   </div>
 
   <button class="act-btn act-steady" id="btn-steady" aria-label="Steady breath">◉</button>
-  <button class="act-btn act-trick" id="btn-trick" aria-label="Turn around">↺</button>
 
   <div class="coach" id="coach" hidden></div>
   <div class="gust-flash" id="gust-flash"></div>
