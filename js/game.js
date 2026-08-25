@@ -10,7 +10,7 @@
 import * as THREE from '../lib/three.module.min.js';
 import { LinePhysics, BalanceModel, Wind, clamp, lerp, FALL_TILT } from './physics.js';
 import { Environment } from './environment.js';
-import { Character } from './character.js';
+import { Character, tryLoadWalker } from './character.js';
 import { InputController } from './input.js';
 import { audio } from './audio.js';
 import { store } from './storage.js';
@@ -71,7 +71,7 @@ export class Game {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.dpr));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.22;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 6000);
@@ -127,6 +127,14 @@ export class Game {
     this.character = new Character(store.player.appearance);
     this.scene.add(this.character.root);
 
+    // If a rigged human has been dropped into assets/, use it. Absent that,
+    // the procedural walker stays. Either way the game starts immediately.
+    tryLoadWalker().then(gltf => {
+      if (gltf && this.character.adoptModel(gltf)) {
+        this.emit('toast', 'Rigged walker loaded');
+      }
+    });
+
     this.balance = new BalanceModel();
   }
 
@@ -161,7 +169,8 @@ export class Game {
     this.dir = 1;                     // +1 walks toward the far cliff (-Z)
     this.distance = 0;
     this.runSteps = 0;
-    this.turnDistance = 0;
+    this.crossed = false;
+    this._anchorLock = false;
     this.windTime = 0;
     this.balance.reset();
     this.breath = 1;
@@ -237,17 +246,8 @@ export class Game {
     }
   }
 
-  requestTurn () {
-    if (this.state !== 'play' || this.paused) return;
-    if (!store.player.unlockedTricks.includes('turn180')) return;
-    if (this.character.state !== 'stand') return;
-    if (Math.abs(this.balance.tilt) > 0.55) { this.emit('toast', 'Too wobbly to turn'); return; }
-    this.character.startTurn();
-    this.balance.applyTrick(1.35);
-    this.line.addImpulseSpread(this.lineT, 3.5 * Math.sign(this.balance.tilt || 1), -5, 9);
-    audio.wobble(0.6);
-    this.turning = true;
-  }
+  /** Turning on the line is shelved for now — kept as a no-op hook. */
+  requestTurn () { /* removed: see README */ }
 
   haptic (ms) {
     if (!store.settings.haptics) return;
@@ -326,7 +326,7 @@ export class Game {
         noiseScale: this.noiseScale * (sitting ? 0.45 : 1)
       });
 
-      if (res === 'fall' && !this.turning) this._beginFall();
+      if (res === 'fall') this._beginFall();
 
       // wobble feedback near the edge
       const dgr = this.balance.danger;
@@ -351,6 +351,9 @@ export class Game {
     const anim = this.character.update(dt, {
       tilt: this.balance.tilt,
       tiltVel: this.balance.tiltVel,
+      arm: this.balance.arm,
+      armVel: this.balance.armVel,
+      atLimit: this.balance.atLimit,
       danger: this.balance.danger,
       lineSlope: slope,
       windLateral: this.wind.lateral
@@ -366,15 +369,6 @@ export class Game {
       this.line.addImpulseSpread(this.lineT, 2.2 * Math.sign(this.balance.tilt || 1), -6.5, 10);
       audio.footstep();
     }
-    if (this.turning && this.character.state === 'stand') {
-      this.turning = false;
-      this.dir *= -1;
-      this.turnDistance = 0;
-      store.player.tricksLanded++;
-      store.save();
-      this.emit('trick', '180 turn');
-    }
-
     /* ---- sitting counts as a landed trick after a couple of seconds ---- */
     if (sitting && this.state === 'play') {
       this.sitTimer += dt;
@@ -431,7 +425,6 @@ export class Game {
     const len = this.def.lineLength;
     this.walkPos += metres * this.dir;
     this.distance += metres;
-    if (this.dir < 0) this.turnDistance += metres;
 
     if (this.walkPos > len - 1.0) {
       this.walkPos = len - 1.0;
@@ -442,19 +435,18 @@ export class Game {
     }
   }
 
-  /** Reaching a cliff is a small win, then you turn and walk back. */
+  /** Touching the far rock ends the run as a completed crossing. */
   _anchorReached () {
-    if (this._anchorLock) return;
+    if (this._anchorLock || this.state !== 'play') return;
     this._anchorLock = true;
-    setTimeout(() => { this._anchorLock = false; }, 1200);
-    if (this.character.state === 'stand' || this.character.state === 'step') {
-      this.character.state = 'stand';
-      this.character.startTurn();
-      this.turning = true;
-      this.balance.applyTrick(0.6);
-      audio.chime();
-      this.emit('toast', 'Anchor reached — turning back');
-    }
+    this.character.state = 'stand';
+    this.crossed = true;
+    audio.chime();
+    this.haptic([20, 60, 20]);
+    this.input.setEnabled(false);
+    this.state = 'result';
+    const { metres, record } = this.bankRun();
+    this.emit('crossed', { distance: metres, record, focusLeft: this.focus ?? 3 });
   }
 
   _placeOnLine () {
@@ -462,9 +454,7 @@ export class Game {
     const s = this.line.sample(t);
     const c = this.character.root;
     c.position.set(s.x, s.y, this.worldZAt(this.walkPos));
-    // the turn animation drives the rotation itself; outside of it we just
-    // hold the facing so repeated turns cannot wind the walker up
-    if (this.character.state !== 'turn') c.rotation.y = this.dir > 0 ? 0 : Math.PI;
+    c.rotation.y = this.dir > 0 ? 0 : Math.PI;
   }
 
   /* ================= falling ================= */
@@ -581,7 +571,7 @@ export class Game {
     let value = 0;
     if (c.type === 'distance') value = this.distance;
     else if (c.type === 'windTime') value = this.windTime;
-    else if (c.type === 'turnBack') value = this.turnDistance;
+    else if (c.type === 'crossing') value = this.crossed ? 1 : 0;
 
     this.emit('objective', { challenge: c, value });
 
@@ -637,36 +627,48 @@ export class Game {
       // sun) in frame. A full orbit would swing the camera into the near
       // cliff, which is the last thing the title screen should show.
       this.menuAngle = (this.menuAngle || 0) + dt * 0.055;
-      const arc = Math.sin(this.menuAngle) * 0.42;              // ±24°
+      const arc = 0.5 + Math.sin(this.menuAngle) * 0.30;        // swung off-axis, drifting
       const r = 6.8 + Math.sin(this.menuAngle * 0.6) * 0.9;
       c.position.set(
         target.x + Math.sin(arc) * r,
-        target.y + 2.05 + Math.sin(this.menuAngle * 0.43) * 0.35,
+        target.y + 2.6 + Math.sin(this.menuAngle * 0.43) * 0.35,
         target.z + Math.cos(arc) * r
       );
-      c.lookAt(target.x * 0.5, target.y + 1.25, target.z - 26);  // down the line
+      c.lookAt(target.x * 0.5, target.y + 0.2, target.z - 30);   // down the line
       c.rotation.z = 0;
       return;
     }
 
     const danger = this.balance.danger;
     const behind = this.dir > 0 ? 1 : -1;
-    let dist = 4.9 - danger * 1.1;
-    let height = 1.85 + danger * 0.12;
+    // Sit higher and look down the line rather than along it: the drop is the
+    // whole point, and a camera at walker height cannot see any of it.
+    let dist = 5.4 - danger * 1.2;
+    let height = 2.55 + danger * 0.15;
 
     if (this.state === 'falling' || this.state === 'hanging' || this.state === 'result') {
       dist = 6.2; height = 1.2;
     }
 
+    // Yaw the camera off the line's axis. Looking straight down the webbing
+    // puts the far anchor wall dead centre and backlit — a black slab. Swung
+    // round, the gorge itself opens along the frame: cloud sea, both rims
+    // converging, ranges beyond. It is how every highline photograph is
+    // composed, and it costs nothing.
+    const YAW = 0.42;                                  // ~24 degrees
     const desired = this.tmpV.set(
-      target.x * 0.55,
+      target.x * 0.55 + Math.sin(YAW) * dist * behind,
       target.y + height,
-      target.z + behind * dist
+      target.z + Math.cos(YAW) * dist * behind
     );
     c.position.lerp(desired, clamp(dt * 3.2, 0, 1));
 
     const look = this._look || (this._look = new THREE.Vector3(target.x, target.y + 1.1, target.z - behind * 2.5));
-    this._scratchB.set(target.x * 0.7, target.y + 1.1, target.z - behind * 2.5);
+    this._scratchB.set(
+      target.x * 0.7 - Math.sin(0.42) * 5 * behind,
+      target.y - 1.15,
+      target.z - Math.cos(0.42) * 7.5 * behind
+    );
     look.lerp(this._scratchB, clamp(dt * 4, 0, 1));
     c.lookAt(look);
 
