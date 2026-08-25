@@ -18,7 +18,7 @@ function defaults () {
       totalSteps: 0,
       longestWalk: 0,
       tricksLanded: 0,
-      unlockedTricks: ['sit', 'turn180'],
+      unlockedTricks: ['sit'],
       appearance: { shirt: '#4a5a4e', pants: '#31415c', line: '#c8543a' }
     },
     locations: {
