@@ -50,6 +50,11 @@ game.on('falling', () => ui.coach(null));
 
 game.on('banked', () => ui.checkUnlocks());
 
+game.on('crossed', info => {
+  ui.showCrossing(info);
+  ui.checkUnlocks();
+});
+
 game.on('fell', info => {
   ui.showFall(info);
   ui.checkUnlocks();
