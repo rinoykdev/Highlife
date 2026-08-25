@@ -225,15 +225,34 @@ export class LinePhysics {
 }
 
 /* =========================================================
-   BALANCE MODEL
+   BALANCE MODEL  —  arms first, body second
 
-   tilt: -1 (falling left) .. 0 (centred) .. +1 (falling right)
-   Below ~0.35 the body self-centres slightly; past ~0.6 the
-   destabilising term wins and the player has to work; past
-   ~0.85 no amount of input can save it. That gradient is the
-   entire game.
+   A highliner does not balance with their torso; they balance
+   with their arms and the torso follows. So the player's touch
+   drives an ARM state with its own inertia, and the body only
+   feels the arms:
+
+       touch  ->  arms swing (fast, ~0.25 s)
+                     |
+                     +-- static: arms out to one side move the
+                     |   centre of mass that way
+                     +-- dynamic: swinging them generates a
+                         reaction torque the other way
+
+   That two-stage lag is the whole feel. It also gives failure a
+   physical cause rather than an arbitrary one: at full stretch
+   you have run out of arm, and nothing more is coming.
    ========================================================= */
 export const FALL_TILT = 1.0;
+
+const ARM_K = 46;        // how hard the arms chase your hands
+const ARM_D = 9;         // arm damping (0.66 critical -> quick, slight overshoot)
+const ARM_STATIC = 5.0;  // torque from where the arms ARE
+const ARM_DYN = 0.03;    // reaction torque from how fast they MOVE
+                         // (kept small on purpose: at 0.16 the counter-kick
+                         //  briefly overpowered the weight shift, so pressing
+                         //  right moved you left for ~0.2 s — correct physics,
+                         //  unplayable controls)
 
 export class BalanceModel {
   constructor () { this.reset(); }
@@ -241,71 +260,67 @@ export class BalanceModel {
   reset () {
     this.tilt = (Math.random() - 0.5) * 0.08;
     this.tiltVel = 0;
+    this.arm = 0;             // -1 fully left .. +1 fully right
+    this.armVel = 0;
+    this.armAcc = 0;
+    this.atLimit = 0;         // 0..1, how pinned the arms are
     this.t = Math.random() * 1000;
-    this.stepPhase = 0;        // 0 = both feet planted, >0 = mid-step
-    this.stepDir = 1;
-    this.authority = 1;        // reduced while stepping / after a trick
+    this.stepPhase = 0;
+    this.authority = 1;
     this.lastInput = 0;
   }
 
-  /** Kick from taking a step: always destabilising, direction varies. */
   applyStep (strength = 1) {
     const bias = Math.sign(this.tilt || (Math.random() - 0.5));
     const kick = (0.42 + Math.random() * 0.36) * strength;
-    // the step mostly pushes you further the way you were already going
     this.tiltVel += kick * bias * 0.75 + (Math.random() - 0.5) * kick * 0.9;
     this.stepPhase = 1;
   }
 
-  /** Bigger, riskier disturbance for tricks. */
   applyTrick (strength = 1.6) {
     this.tiltVel += (Math.random() - 0.5) * 1.1 * strength;
     this.tilt += (Math.random() - 0.5) * 0.16 * strength;
     this.authority = 0.55;
   }
 
-  /**
-   * @param {number} dt
-   * @param {object} p
-   *   input        -1..1 analog player lean
-   *   wind         -1..1 signed wind push
-   *   lineAccel    lateral acceleration of the webbing underfoot
-   *   steady       bool, holding breath/steadying
-   *   sensitivity  0.6..1.5
-   *   noiseScale   difficulty multiplier
-   * @returns {'ok'|'fall'}
-   */
   update (dt, p) {
     this.t += dt;
     const a = Math.abs(this.tilt);
 
-    // recover step/trick authority
     if (this.stepPhase > 0) this.stepPhase = Math.max(0, this.stepPhase - dt * 2.2);
     this.authority = Math.min(1, this.authority + dt * 0.8);
 
-    // 1. destabilising torque — grows super-linearly with lean
-    const destab = 6.0 * this.tilt * (0.35 + 0.65 * a);
+    /* ---- 1. the arms chase the player's hands ---- */
+    const reach = (p.sensitivity ?? 1) * this.authority * (this.stepPhase > 0 ? 0.85 : 1);
+    const armTarget = clamp((p.input || 0) * reach, -1, 1);
+    // Instinct: the arms reach for the HIGH side on their own, which is what
+    // shifts the centre of mass back over the line. (Signed against the tilt —
+    // with the sign the other way round the reflex feeds the fall instead.)
+    const instinct = clamp(-this.tilt * 0.10, -0.10, 0.10);
+    const armAcc = (armTarget + instinct - this.arm) * ARM_K - this.armVel * ARM_D;
+    this.armVel += armAcc * dt;
+    this.arm += this.armVel * dt;
+    if (this.arm > 1) { this.arm = 1; this.armVel = Math.min(0, this.armVel); }
+    if (this.arm < -1) { this.arm = -1; this.armVel = Math.max(0, this.armVel); }
+    this.armAcc = armAcc;
+    this.atLimit = clamp((Math.abs(this.arm) - 0.82) / 0.18, 0, 1);
+    this.lastInput = p.input || 0;
 
-    // 2. passive body correction — vanishes once you're really committed
+    /* ---- 2. the body responds to the arms ---- */
+    const destab = 6.0 * this.tilt * (0.35 + 0.65 * a);
     const passiveGain = p.steady ? 6.6 : 5.2;
     const passive = passiveGain * this.tilt * Math.max(0, 1 - a * 1.15);
+    const tremor = fbm(this.t * 1.35) * (p.steady ? 0.70 : 2.6) * (p.noiseScale ?? 1);
 
-    // 3. micro tremor — you are never perfectly still
-    const tremor = fbm(this.t * 1.35) * (p.steady ? 0.42 : 1.55) * (p.noiseScale ?? 1);
+    // where the arms are moves the centre of mass; how fast they swing
+    // kicks back the other way
+    const fromArms = ARM_STATIC * this.arm - ARM_DYN * armAcc;
 
-    // 4. player input, less effective the further you are gone
-    const inp = clamp(p.input || 0, -1, 1);
-    this.lastInput = inp;
-    const player = inp * 7.0 * (1 - 0.4 * a) * (p.sensitivity ?? 1) *
-                   this.authority * (this.stepPhase > 0 ? 0.78 : 1);
-
-    // 5. wind + the webbing moving under the feet
     const wind = (p.wind || 0) * 1.35 * (p.steady ? 0.65 : 1);
     const line = -(p.lineAccel || 0) * 0.42;
+    const damp = (p.steady ? 5.70 : 3.0) * this.tiltVel;
 
-    const damp = (p.steady ? 3.4 : 1.6) * this.tiltVel;
-
-    const acc = destab - passive + tremor + player + wind + line - damp;
+    const acc = destab - passive + tremor + fromArms + wind + line - damp;
     this.tiltVel += acc * dt;
     this.tiltVel = clamp(this.tiltVel, -6, 6);
     this.tilt += this.tiltVel * dt;
@@ -317,9 +332,10 @@ export class BalanceModel {
     return 'ok';
   }
 
-  /** 0..1 — how close to gone. Used for camera, audio, haptics. */
   get danger () { return clamp(Math.abs(this.tilt) / FALL_TILT, 0, 1); }
 
-  /** True once input alone can no longer save it. */
-  get committed () { return Math.abs(this.tilt) > 0.86; }
+  /** True once the arms are maxed out and still losing ground. */
+  get committed () {
+    return this.atLimit > 0.9 && Math.sign(this.tilt) === Math.sign(this.arm) && Math.abs(this.tilt) > 0.7;
+  }
 }
