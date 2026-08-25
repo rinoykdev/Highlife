@@ -11,6 +11,70 @@
 import * as THREE from '../lib/three.module.min.js';
 import { clamp, lerp } from './physics.js';
 
+/* ---------------------------------------------------------
+   Optional rigged human.
+
+   Primitives will never read as a real person. If a rigged
+   glTF is present at assets/walker.glb it replaces the built
+   rig entirely, and the balance animation drives its bones
+   instead. Mixamo's naming is assumed because it is what the
+   free exports use; anything close enough is matched loosely.
+
+   The file is deliberately optional — nothing downloads at
+   runtime, and with no model present the procedural walker
+   is used exactly as before. See README.
+   --------------------------------------------------------- */
+export const MODEL_URL = 'assets/walker.glb';
+
+const BONE_ALIASES = {
+  hips:      ['hips', 'pelvis', 'root'],
+  spine:     ['spine1', 'spine_01', 'spine'],
+  chest:     ['spine2', 'chest', 'upperchest', 'spine_02'],
+  head:      ['head'],
+  armL:      ['leftarm', 'upperarm_l', 'shoulder_l', 'leftupperarm'],
+  armR:      ['rightarm', 'upperarm_r', 'shoulder_r', 'rightupperarm'],
+  foreL:     ['leftforearm', 'lowerarm_l', 'leftlowerarm'],
+  foreR:     ['rightforearm', 'lowerarm_r', 'rightlowerarm'],
+  legL:      ['leftupleg', 'thigh_l', 'leftthigh'],
+  legR:      ['rightupleg', 'thigh_r', 'rightthigh'],
+  shinL:     ['leftleg', 'calf_l', 'leftcalf'],
+  shinR:     ['rightleg', 'calf_r', 'rightcalf']
+};
+
+/** Loosely match a bone by name, ignoring prefixes like `mixamorig:`. */
+function findBones (root) {
+  const found = {};
+  const norm = (n) => n.toLowerCase().replace(/^mixamorig:?/, '').replace(/[._\s-]/g, '');
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    const n = norm(o.name);
+    for (const key in BONE_ALIASES) {
+      if (found[key]) continue;
+      if (BONE_ALIASES[key].some(a => n === a.replace(/[._\s-]/g, ''))) found[key] = o;
+    }
+  });
+  return found;
+}
+
+/**
+ * Try to load the rigged model. Resolves to null when the file is absent,
+ * which is the normal case — callers fall back to the procedural rig.
+ */
+export async function tryLoadWalker () {
+  try {
+    const head = await fetch(MODEL_URL, { method: 'HEAD' });
+    if (!head.ok) return null;
+  } catch (e) { return null; }
+  try {
+    const { GLTFLoader } = await import('../lib/GLTFLoader.js');
+    const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
+    return gltf;
+  } catch (e) {
+    console.warn('[highline] walker.glb present but could not be loaded', e);
+    return null;
+  }
+}
+
 const MAX_LEAN = 0.72;      // radians at full tilt — past this you are gone
 
 export class Character {
@@ -20,11 +84,11 @@ export class Character {
     this.root.add(this.lean);
 
     this.mats = {
-      skin:  new THREE.MeshLambertMaterial({ color: 0xc79a76 }),
+      skin:  new THREE.MeshLambertMaterial({ color: 0xb98a63 }),
       shirt: new THREE.MeshLambertMaterial({ color: new THREE.Color(appearance.shirt) }),
       pants: new THREE.MeshLambertMaterial({ color: new THREE.Color(appearance.pants) }),
       dark:  new THREE.MeshLambertMaterial({ color: 0x22201e }),
-      hair:  new THREE.MeshLambertMaterial({ color: 0x33261d })
+      hair:  new THREE.MeshLambertMaterial({ color: 0x2a1f17 })
     };
 
     this._build();
@@ -55,13 +119,17 @@ export class Character {
     this.pelvis.position.y = 0.93;
     this.lean.add(this.pelvis);
 
-    this._mesh(G(new THREE.CapsuleGeometry(0.115, 0.10, 3, 8)), M.pants, this.pelvis, 0, 0, 0);
+    this._mesh(G(new THREE.CapsuleGeometry(0.108, 0.09, 4, 10)), M.pants, this.pelvis, 0, 0, 0);
 
     // --- torso ---
     this.torso = new THREE.Group();
     this.torso.position.y = 0.08;
     this.pelvis.add(this.torso);
-    this._mesh(G(new THREE.CapsuleGeometry(0.135, 0.34, 4, 10)), M.shirt, this.torso, 0, 0.24, 0);
+    // chest tapers to the waist: two capsules read far more human than one
+    const chest = this._mesh(G(new THREE.CapsuleGeometry(0.132, 0.20, 5, 12)), M.shirt, this.torso, 0, 0.33, 0);
+    chest.scale.set(1.18, 1, 0.74);
+    const waist = this._mesh(G(new THREE.CapsuleGeometry(0.104, 0.13, 4, 10)), M.shirt, this.torso, 0, 0.15, 0);
+    waist.scale.set(1.06, 1, 0.78);
 
     // harness: a band plus two leg loops, the reason a fall is survivable
     this.harness = this._mesh(G(new THREE.CylinderGeometry(0.15, 0.155, 0.075, 12, 1, true)), M.dark, this.pelvis, 0, 0.01, 0);
@@ -71,8 +139,12 @@ export class Character {
     this.neck = new THREE.Group();
     this.neck.position.y = 0.47;
     this.torso.add(this.neck);
-    this._mesh(G(new THREE.SphereGeometry(0.115, 12, 10)), M.skin, this.neck, 0, 0.10, 0);
-    this._mesh(G(new THREE.SphereGeometry(0.062, 8, 8)), M.hair, this.neck, 0, 0.19, -0.055);
+    this._mesh(G(new THREE.CylinderGeometry(0.042, 0.05, 0.07, 8)), M.skin, this.neck, 0, 0.02, 0);
+    const head = this._mesh(G(new THREE.SphereGeometry(0.098, 14, 12)), M.skin, this.neck, 0, 0.14, 0);
+    head.scale.set(0.92, 1.12, 1.0);
+    const hair = this._mesh(G(new THREE.SphereGeometry(0.101, 12, 10)), M.hair, this.neck, 0, 0.152, -0.012);
+    hair.scale.set(0.95, 1.02, 1.0);
+    this._mesh(G(new THREE.SphereGeometry(0.048, 8, 8)), M.hair, this.neck, 0, 0.20, -0.062);
 
     // --- arms (the balance poles) ---
     this.armL = this._arm(-1);
@@ -99,9 +171,10 @@ export class Character {
     const elbow = new THREE.Group();
     elbow.position.set(0.30 * side, 0, 0);
     upper.add(elbow);
-    const fore = this._mesh(new THREE.CapsuleGeometry(0.038, 0.24, 3, 7), M.skin, elbow, 0.145 * side, 0, 0);
+    const fore = this._mesh(new THREE.CapsuleGeometry(0.034, 0.24, 4, 8), M.skin, elbow, 0.145 * side, 0, 0);
     fore.rotation.z = Math.PI / 2;
-    this._mesh(new THREE.SphereGeometry(0.045, 7, 6), M.skin, elbow, 0.30 * side, 0, 0);
+    const hand = this._mesh(new THREE.SphereGeometry(0.042, 8, 7), M.skin, elbow, 0.305 * side, 0, 0);
+    hand.scale.set(1.25, 0.85, 0.55);
 
     return { shoulder, upper, elbow, side };
   }
@@ -114,19 +187,106 @@ export class Character {
 
     const thigh = new THREE.Group();
     hip.add(thigh);
-    this._mesh(new THREE.CapsuleGeometry(0.058, 0.34, 3, 7), M.pants, thigh, 0, -0.20, 0);
+    this._mesh(new THREE.CapsuleGeometry(0.062, 0.32, 4, 9), M.pants, thigh, 0, -0.20, 0);
 
     const knee = new THREE.Group();
     knee.position.y = -0.40;
     thigh.add(knee);
-    this._mesh(new THREE.CapsuleGeometry(0.048, 0.32, 3, 7), M.pants, knee, 0, -0.19, 0);
+    this._mesh(new THREE.CapsuleGeometry(0.045, 0.30, 4, 9), M.pants, knee, 0, -0.19, 0);
 
     const ankle = new THREE.Group();
     ankle.position.y = -0.38;
     knee.add(ankle);
-    const foot = this._mesh(new THREE.BoxGeometry(0.075, 0.045, 0.24), M.dark, ankle, 0, -0.03, 0.03);
+    const foot = this._mesh(new THREE.BoxGeometry(0.078, 0.05, 0.235), M.dark, ankle, 0, -0.032, 0.035);
+    // a rounded toe stops the shoe reading as a brick
+    const toe = this._mesh(new THREE.SphereGeometry(0.039, 8, 6), M.dark, ankle, 0, -0.03, 0.145);
+    toe.scale.set(1, 0.62, 1.05);
 
     return { hip, thigh, knee, ankle, foot, side };
+  }
+
+  /**
+   * Swap the primitive body for a rigged glTF. The lean group still carries
+   * the balance roll, so all the existing animation keeps working; only the
+   * limbs are re-targeted onto real bones.
+   */
+  adoptModel (gltf) {
+    const model = gltf.scene || gltf.scenes[0];
+    if (!model) return false;
+
+    // scale so the model stands 1.75 m tall, whatever units it was authored in
+    const box = new THREE.Box3().setFromObject(model);
+    const h = box.max.y - box.min.y;
+    if (h > 0.01) model.scale.setScalar(1.75 / h);
+    model.position.y = -box.min.y * (1.75 / Math.max(h, 0.01));
+
+    model.traverse(o => {
+      if (o.isMesh) { o.frustumCulled = false; o.castShadow = false; }
+    });
+
+    this.bones = findBones(model);
+    this.model = model;
+    this.usingModel = true;
+
+    // hide the primitive body but keep the rig groups alive for the maths
+    this.pelvis.visible = false;
+    this.pelvis.traverse(o => { o.visible = false; });
+    this.lean.add(model);
+
+    for (const k in this.bones) {
+      const b = this.bones[k];
+      if (b) b.userData.rest = b.rotation.clone();
+    }
+    return true;
+  }
+
+  /** Drive the loaded skeleton from the same balance state. */
+  _poseModel (dt, tilt, s) {
+    const B = this.bones || {};
+    const arm = clamp(s.arm ?? 0, -1, 1);
+    const rest = (b) => b.userData.rest || { x: 0, y: 0, z: 0 };
+    const ease = clamp(dt * 12, 0, 1);
+
+    if (B.spine) {
+      const r = rest(B.spine);
+      B.spine.rotation.z = lerp(B.spine.rotation.z, r.z + tilt * 0.10, ease);
+      B.spine.rotation.y = lerp(B.spine.rotation.y, r.y + arm * 0.12, ease);
+    }
+    if (B.chest) {
+      const r = rest(B.chest);
+      B.chest.rotation.z = lerp(B.chest.rotation.z, r.z + tilt * 0.12, ease);
+    }
+    if (B.head) {
+      const r = rest(B.head);
+      B.head.rotation.z = lerp(B.head.rotation.z, r.z - tilt * 0.34, ease);
+    }
+    // arms: the see-saw that actually generates the correcting torque
+    const pairs = [[B.armL, -1], [B.armR, 1]];
+    for (const [bone, sd] of pairs) {
+      if (!bone) continue;
+      const r = rest(bone);
+      const seesaw = -arm * sd * 1.05;
+      const spread = 1.25 + s.danger * 0.25;      // out to the sides
+      bone.rotation.z = lerp(bone.rotation.z, r.z + sd * (spread + seesaw), ease);
+      bone.rotation.x = lerp(bone.rotation.x, r.x - Math.abs(arm) * 0.25, ease);
+    }
+    for (const [bone, sd] of [[B.foreL, -1], [B.foreR, 1]]) {
+      if (!bone) continue;
+      const r = rest(bone);
+      bone.rotation.y = lerp(bone.rotation.y, r.y + sd * (0.2 - clamp(s.atLimit ?? 0, 0, 1) * 0.18), ease);
+    }
+    // legs take a small crouch as things get hairy
+    const crouch = Math.abs(tilt) * 0.3 + (this.state === 'sit' ? 1.1 : 0);
+    for (const [bone, sd] of [[B.legL, -1], [B.legR, 1]]) {
+      if (!bone) continue;
+      const r = rest(bone);
+      bone.rotation.x = lerp(bone.rotation.x, r.x - crouch * 0.5 + (this.state === 'step' ? Math.sin(this.stepPhase * Math.PI) * 0.5 * (sd === this.stepFoot ? 1 : -0.3) : 0), ease);
+    }
+    for (const [bone] of [[B.shinL], [B.shinR]]) {
+      if (!bone) continue;
+      const r = rest(bone);
+      bone.rotation.x = lerp(bone.rotation.x, r.x + crouch * 0.9, ease);
+    }
   }
 
   setAppearance (a) {
@@ -140,13 +300,6 @@ export class Character {
     this.state = 'step';
     this.stepPhase = 0;
     this.stepFoot *= -1;
-    return true;
-  }
-
-  startTurn () {
-    if (this.state !== 'stand') return false;
-    this.state = 'turn';
-    this.turnPhase = 0;
     return true;
   }
 
@@ -185,34 +338,51 @@ export class Character {
       this.lean.rotation.x = lerp(this.lean.rotation.x, Math.atan(s.lineSlope) * 0.55, clamp(dt * 8, 0, 1));
     }
 
-    /* ---- arms: counterweight, faster and wider the closer to the edge ---- */
-    this.armWave = lerp(this.armWave, Math.abs(s.tiltVel) * 0.9 + s.danger * 0.7, clamp(dt * 8, 0, 1));
-    const flap = Math.sin(this.t * (5 + this.armWave * 7)) * this.armWave * 0.28;
-    // rotation.z is signed by side: positive raise = arm above horizontal
-    const base = -0.12 + s.danger * 0.38 + (this.state === 'step' ? 0.06 : 0);
+    /* ---- arms: the primary control surface, not decoration ----
+       `s.arm` is the balance model's own arm state, so what you see is
+       literally what is generating the correcting torque. Swinging the
+       arms right means the right arm drops and the left one climbs —
+       the whole pair rotates about the shoulders like a see-saw. */
+    const armState = clamp(s.arm ?? 0, -1, 1);
+    const armSpeed = Math.abs(s.armVel ?? 0);
+    this.armWave = lerp(this.armWave, armSpeed * 0.22 + s.danger * 0.5, clamp(dt * 10, 0, 1));
+    // a fast swing throws the forearms out; at full stretch they lock straight
+    const strain = clamp(s.atLimit ?? 0, 0, 1);
+    const flutter = Math.sin(this.t * (6 + this.armWave * 6)) * this.armWave * 0.16;
+
     for (const arm of [this.armL, this.armR]) {
       const sd = arm.side;
-      // the arm on the side you are toppling toward comes up hardest
-      const rise = clamp(-tilt * sd, -1, 1) * 0.5;
-      arm.shoulder.rotation.z = sd * (base + rise + flap);
-      arm.shoulder.rotation.x = Math.sin(this.t * 1.1 + sd) * 0.05 - s.danger * 0.12;
-      arm.upper.rotation.y = -sd * (0.15 + this.armWave * 0.15);
-      arm.elbow.rotation.y = sd * (0.1 + Math.abs(tilt) * 0.35);
-      arm.elbow.rotation.z = -sd * (0.12 + this.armWave * 0.2);
+      // see-saw: +arm raises the LEFT arm and lowers the RIGHT
+      const seesaw = -armState * sd * 0.95;
+      const spread = -0.10 + s.danger * 0.30 + (this.state === 'step' ? 0.08 : 0);
+      arm.shoulder.rotation.z = sd * (spread + seesaw + flutter);
+      // arms also sweep forward slightly as they rise, like a real counterweight
+      arm.shoulder.rotation.x = -Math.abs(armState) * 0.22 - s.danger * 0.10
+                                + Math.sin(this.t * 1.1 + sd) * 0.04;
+      arm.shoulder.rotation.y = armState * 0.20 * sd;
+      // elbow straightens under strain, bends when relaxed
+      arm.elbow.rotation.y = sd * (0.26 - strain * 0.22 + Math.abs(armState) * 0.10);
+      arm.elbow.rotation.z = -sd * (0.16 - strain * 0.12);
+      arm.upper.rotation.y = -sd * (0.12 + this.armWave * 0.10);
     }
 
+    // the shoulders lead the hips: the torso is dragged round by the arms
+    this.torso.rotation.y = lerp(this.torso.rotation.y, armState * 0.16, clamp(dt * 9, 0, 1));
+
     /* ---- torso ---- */
-    this.torso.rotation.z = tilt * 0.16;
+    this.torso.rotation.z = tilt * 0.16 + (s.arm ?? 0) * 0.05;
     this.torso.rotation.x = -0.04 + breath + (this.state === 'sit' ? 0.12 : 0);
-    this.neck.rotation.z = -tilt * 0.22;
+    // eyes stay level with the horizon — a walker never looks at their feet
+    this.neck.rotation.z = -tilt * 0.42;
     this.neck.rotation.x = 0.06 - s.danger * 0.1;
+
+    if (this.usingModel) this._poseModel(dt, tilt, s);
 
     /* ---- state machines ---- */
     switch (this.state) {
       case 'stand': this._poseStand(dt, tilt, s); break;
       case 'step':  out.stepCompleted = this._poseStep(dt, tilt, out); break;
       case 'sit':   this._poseSit(dt); break;
-      case 'turn':  this._poseTurn(dt); break;
       case 'fall':  this._poseFall(dt); break;
       case 'hang':  this._poseHang(dt); break;
     }
@@ -285,31 +455,6 @@ export class Character {
       leg.knee.rotation.x = lerp(leg.knee.rotation.x, 1.35 * a, clamp(dt * 6, 0, 1));
       leg.ankle.rotation.x = lerp(leg.ankle.rotation.x, -0.2 * a, clamp(dt * 6, 0, 1));
     }
-  }
-
-  /** 180 on the line: pivot on the balls of the feet over ~0.9 s. */
-  _poseTurn (dt) {
-    const DUR = 0.9;
-    this.turnPhase += dt / DUR;
-    const p = clamp(this.turnPhase, 0, 1);
-    const e = p * p * (3 - 2 * p);
-    this.lean.rotation.y = e * Math.PI;
-    this.pelvis.position.y = 0.93 - Math.sin(p * Math.PI) * 0.09;
-    for (const leg of [this.legL, this.legR]) {
-      const lift = Math.sin(p * Math.PI) * (leg.side === this.stepFoot ? 1 : 0.4);
-      leg.thigh.rotation.x = 0.1 - lift * 0.25;
-      leg.knee.rotation.x = 0.15 + lift * 0.7;
-      leg.hip.position.z = lerp(leg.hip.position.z, 0.02 * leg.side, clamp(dt * 6, 0, 1));
-    }
-    if (p >= 1) {
-      // bake the turn into the root so lean.y goes back to zero
-      this.lean.rotation.y = 0;
-      this.root.rotation.y += Math.PI;
-      this.state = 'stand';
-      this.turnPhase = 0;
-      return true;
-    }
-    return false;
   }
 
   _poseFall (dt) {
